@@ -88,3 +88,4 @@ def generate_habits():
 
 if __name__ == "__main__":
    generate_habits()
+ 
