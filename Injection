@@ -1,0 +1,90 @@
+import psycopg2
+from datetime import datetime, timedelta
+import random
+
+
+DB_CONF = {
+   "database": "the_home_stuff",
+   "user": "pi_user",
+   "password": "raspberry",
+   "host": "localhost"
+}
+
+
+
+
+def generate_habits():
+   try:
+       conn = psycopg2.connect(**DB_CONF)
+       cur = conn.cursor()
+
+
+       #30 days reset
+       start_date = datetime.now() - timedelta(days=30)
+       current_time = start_date
+
+
+       print("Injecting 30 days of behavioral patterns... please wait.")
+
+
+       while current_time < datetime.now():
+           h = current_time.hour
+
+
+           #Sleep is 11pm to 7am. Low motion and dark
+           if h >= 23 or h < 7:
+               motion = random.random() < 0.03  #3% chance
+               sound = random.random() < 0.02  # 2% chance
+               bright = False
+               temp = random.uniform(18.5, 20.5)
+
+
+           #Morning 7am to 9am high activity and bright
+           elif 7 <= h < 9:
+               motion = random.random() < 0.85
+               sound = random.random() < 0.50
+               bright = True
+               temp = random.uniform(21.0, 23.0)
+
+
+           #Working hours 9am to 4pm, away from home
+           elif 9 <= h < 16:
+               motion = random.random() < 0.01
+               sound = random.random() < 0.01
+               bright = False
+               temp = random.uniform(22.0, 24.0)
+
+
+           #Evening relaxation with sustained activity
+           else:
+               motion = random.random() < 0.90
+               sound = random.random() < 0.60
+               bright = True
+               temp = random.uniform(23.0, 25.0)
+
+
+           #Insertment slab
+           cur.execute("""
+               INSERT INTO sensor_data (created_at, motion_detected, sound_detected, temperature, humidity, is_bright)
+               VALUES (%s, %s, %s, %s, %s, %s)
+           """, (current_time, motion, sound, temp, 40.0, bright))
+
+
+           #15 minutes push
+           current_time += timedelta(minutes=15)
+
+
+       conn.commit()
+       print("Injection completed")
+       cur.close()
+       conn.close()
+
+
+   except Exception as e:
+       print(f"Failed to inject data: {e}")
+
+
+
+
+if __name__ == "__main__":
+   generate_habits()
