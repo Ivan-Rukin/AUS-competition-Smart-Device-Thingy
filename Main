@@ -1,0 +1,181 @@
+import time
+import board
+import adafruit_dht
+import psycopg2
+from gpiozero import MotionSensor, DigitalInputDevice, LED
+
+
+#hardware pinout
+LED_LIGHT = LED(4)
+LED_AC_ON = LED(6)
+LED_HOTTER = LED(13)
+LED_COLDER = LED(19)
+LED_PRESENCE = LED(20)
+
+
+PIR = MotionSensor(18)
+LDR = DigitalInputDevice(24)
+SOUND = DigitalInputDevice(23)
+DHT_DEVICE = adafruit_dht.DHT11(board.D21)
+
+
+#fake data
+last_temp = 0
+last_hum = 0
+last_motion = False
+last_bright = False
+last_sound = False
+last_log_time = time.time()
+
+
+DB_CONF = {
+   "database": "the_home_stuff",
+   "user": "pi_user",
+   "password": "raspberry",
+   "host": "localhost"
+}
+
+
+
+
+def get_historical_context(cursor):
+   try:
+       cursor.execute("""
+           SELECT COUNT(*) FROM sensor_data
+           WHERE (motion_detected = TRUE)
+           AND created_at > NOW() - INTERVAL '10 minutes';
+       """)
+       return cursor.fetchone()[0]
+   except:
+       return 0
+
+
+
+
+def get_habit_score(cursor):
+   try:
+       cursor.execute("""
+           SELECT AVG(case when motion_detected OR sound_detected then 1 else 0 end)
+           FROM sensor_data
+           WHERE EXTRACT(HOUR FROM created_at) = EXTRACT(HOUR FROM NOW())
+           AND created_at > NOW() - INTERVAL '30 days';
+       """)
+       score = cursor.fetchone()[0]
+       return float(score) if score is not None else 0.0
+   except:
+       return 0.0
+
+
+
+
+#Engine
+try:
+   print("Decision Engine Started...")
+   while True:
+       try:
+           current_hour = time.localtime().tm_hour
+           is_sleep_time = current_hour >= 23 or current_hour < 7
+           now = time.time()
+
+
+           #Temperature reading
+           try:
+               temp = DHT_DEVICE.temperature
+               hum = DHT_DEVICE.humidity
+           except RuntimeError:
+               temp = last_temp if last_temp != 0 else 22.0
+               hum = last_hum if last_hum != 0 else 50.0
+
+
+           #Digital reading
+           try:
+               motion = PIR.motion_detected
+               sound = SOUND.is_active
+               bright = LDR.is_active
+           except Exception as e:
+               print(f"Sensor error: {e}")
+               motion, sound, bright = False, False, True
+
+
+           #Database contexts
+           try:
+               conn = psycopg2.connect(**DB_CONF)
+               cur = conn.cursor()
+               habit_score = get_habit_score(cur)
+               recent_activity = get_historical_context(cur)
+           except Exception as e:
+               print(f"DB Error: {e}")
+               habit_score, recent_activity = 0.5, 1
+
+
+           #Smart decision
+           if motion or sound:
+               if is_sleep_time:
+                   is_present = True if recent_activity > 3 else False
+               else:
+                   is_present = True
+           elif habit_score < 0.2 and recent_activity < 2:
+               is_present = False
+           elif habit_score > 0.8:
+               is_present = True if recent_activity > 1 else False
+           else:
+               is_present = True if recent_activity > 0 else False
+
+
+           #LEDs
+           if is_present:
+               LED_PRESENCE.on()
+               LED_AC_ON.on()
+               #Light control
+               if not bright:
+                   LED_LIGHT.on()
+               else:
+                   LED_LIGHT.off()
+               #Temp control
+               if temp > 25:
+                   LED_COLDER.on()
+                   LED_HOTTER.off()
+               elif temp < 21:
+                   LED_HOTTER.on()
+                   LED_COLDER.off()
+               else:
+                   LED_HOTTER.off()
+                   LED_COLDER.off()
+           else:
+               #Room empty
+               for led in [LED_PRESENCE, LED_LIGHT, LED_AC_ON, LED_HOTTER, LED_COLDER]:
+                   led.off()
+
+
+           #Database
+           if (abs(temp - last_temp) > 0.5) or (abs(hum - last_hum) > 2.0) or \
+                   (motion != last_motion) or (bright != last_bright) or \
+                   (sound != last_sound) or (now - last_log_time > 900):
+               cur.execute("""INSERT INTO sensor_data (motion_detected, sound_detected, temperature, humidity, is_bright)
+                              VALUES (%s, %s, %s, %s, %s)""", (motion, sound, temp, hum, bright))
+               cur.execute("DELETE FROM sensor_data WHERE created_at < NOW() - INTERVAL '30 days';")
+               conn.commit()
+
+
+               last_temp, last_hum = temp, hum
+               last_motion, last_bright, last_sound = motion, bright, sound
+               last_log_time = now
+               print(f"Logged: Temp={temp}, Presence={is_present}")
+
+
+           cur.close()
+           conn.close()
+
+
+       except Exception as e:
+           print(f"Loop Error: {e}")
+
+
+       time.sleep(5)
+
+
+except KeyboardInterrupt:
+   print("\nShutting down...")
+   for led in [LED_LIGHT, LED_AC_ON, LED_HOTTER, LED_COLDER, LED_PRESENCE]:
+       led.off()
+   DHT_DEVICE.exit()
